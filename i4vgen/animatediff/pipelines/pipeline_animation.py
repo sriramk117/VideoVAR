@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+from PIL import Image
 
 from diffusers.utils import is_accelerate_available
 from packaging import version
@@ -254,6 +255,23 @@ class AnimationPipeline(DiffusionPipeline):
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
         video = video.cpu().float().numpy()
         return video
+
+    def numpy_to_pil(self, images):
+        """
+        Convert a numpy array or a batch of them to a PIL image.
+        """
+        # Import PIL here to avoid import issues
+        from PIL import Image
+        
+        if images.ndim == 3:
+            images = images[None, ...]
+        images = (images * 255).round().astype("uint8")
+        if images.shape[-1] == 1:
+            # special case for grayscale (single channel) images
+            pil_images = [Image.fromarray(image.squeeze(), mode="L") for image in images]
+        else:
+            pil_images = [Image.fromarray(image) for image in images]
+        return pil_images
 
     def prepare_extra_step_kwargs(self, generator, eta):
         # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
