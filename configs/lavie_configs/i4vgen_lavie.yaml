@@ -1,5 +1,5 @@
 # path:
-ckpt_path: "[path to LaVie model]"
+ckpt_path: "/Users/gilliam/Desktop/493G1/VideoVAR/lavie_base.pt"
 output_folder: "./samples/lavie/"
 
 # model config: 

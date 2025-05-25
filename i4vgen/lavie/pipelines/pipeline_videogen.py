@@ -36,7 +36,7 @@ except:
     from diffusers.utils.torch_utils import randn_tensor
 
 
-from diffusers.pipeline_utils import DiffusionPipeline
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from dataclasses import dataclass
 
 import os, sys
@@ -44,6 +44,7 @@ sys.path.append(os.path.split(sys.path[0])[0])
 from i4vgen.lavie.models.unet import UNet3DConditionModel
 
 import numpy as np
+import random
 
 @dataclass
 class StableDiffusionPipelineOutput(BaseOutput):
@@ -104,11 +105,17 @@ class VideoGenPipeline(DiffusionPipeline):
         tokenizer: CLIPTokenizer,
         unet: UNet3DConditionModel,
         scheduler: KarrasDiffusionSchedulers,
+        var_model: Any = None,  # VAR model
+        var_vae: Any = None,    # VAR VAE
     ):
         super().__init__()
 
         # image reward model
         self.image_reward_model = None
+        
+        # VAR model components
+        self.var_model = var_model
+        self.var_vae = var_vae
 
         if hasattr(scheduler.config, "steps_offset") and scheduler.config.steps_offset != 1:
             deprecation_message = (
@@ -407,6 +414,59 @@ class VideoGenPipeline(DiffusionPipeline):
 
         return prompt_embeds
 
+    def generate_var_images(self, num_candidate_images, imagenet_class=980, device=None):
+        """
+        Generate candidate images using VAR model
+        
+        Args:
+            num_candidate_images: Number of candidate images to generate
+            imagenet_class: ImageNet class ID to use for generation (default: 980)
+            device: Device to run generation on
+        
+        Returns:
+            Generated images as tensor
+        """
+        if self.var_model is None or self.var_vae is None:
+            raise ValueError("VAR model and VAE must be provided during initialization")
+            
+        # Set up generation parameters similar to VAR example
+        torch.manual_seed(0)  # For reproducibility
+        random.seed(0)
+        np.random.seed(0)
+        
+        # Generate class labels - use the same class for all candidates
+        class_labels = [imagenet_class] * num_candidate_images
+        label_B = torch.tensor(class_labels, device=device)
+        
+        # Generate images using VAR
+        with torch.inference_mode():
+            with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
+                recon_B3HW = self.var_model.autoregressive_infer_cfg(
+                    B=num_candidate_images, 
+                    label_B=label_B, 
+                    cfg=4.0, 
+                    top_k=900, 
+                    top_p=0.95, 
+                    g_seed=0, 
+                    more_smooth=False
+                )
+        
+        # Convert to the format expected by the rest of the pipeline
+        # VAR outputs images in range [0,1], we need to encode them to latents
+        with torch.no_grad():
+            # Reshape for VAE encoding if needed
+            if recon_B3HW.dim() == 4:  # [B, C, H, W]
+                # Convert from [0,1] to [-1,1] for VAE
+                images_for_vae = recon_B3HW * 2.0 - 1.0
+                # Encode to latents using the pipeline's VAE
+                latents = self.vae.encode(images_for_vae).latent_dist.sample()
+                latents = latents * 0.18215  # Scale factor
+                
+                # Reshape to video format [B, C, 1, H, W] for compatibility
+                latents = latents.unsqueeze(2)
+                
+        return latents
+
     def decode_latents(self, latents):
         video_length = latents.shape[2]
         latents = 1 / 0.18215 * latents
@@ -534,6 +594,7 @@ class VideoGenPipeline(DiffusionPipeline):
         p_ni_vsds: float = 0.6,
         p_re: float = 0.8,
         step_size: float = 1.,
+        imagenet_class: int = 980,  # New parameter for VAR generation
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -541,7 +602,7 @@ class VideoGenPipeline(DiffusionPipeline):
         Args:
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
-                instead.
+                instead. (Note: Currently ignored when using VAR for image generation)
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
@@ -594,6 +655,8 @@ class VideoGenPipeline(DiffusionPipeline):
                 A kwargs dictionary that if specified is passed along to the `AttnProcessor` as defined under
                 `self.processor` in
                 [diffusers.cross_attention](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/cross_attention.py).
+            imagenet_class (`int`, *optional*, defaults to 980):
+                ImageNet class ID to use for VAR image generation.
 
         Examples:
 
@@ -619,7 +682,7 @@ class VideoGenPipeline(DiffusionPipeline):
         elif prompt is not None and isinstance(prompt, list):
             batch_size = len(prompt)
         else:
-            batch_size = prompt_embeds.shape[0]
+            batch_size = prompt_embeds.shape[0] if prompt_embeds is not None else 1
 
         device = self._execution_device
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
@@ -627,7 +690,7 @@ class VideoGenPipeline(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        # 3. Encode input prompt
+        # 3. Encode input prompt (still needed for video generation stage)
         prompt_embeds = self._encode_prompt(
             prompt,
             device,
@@ -654,52 +717,15 @@ class VideoGenPipeline(DiffusionPipeline):
         # ---------------------------------
         print('Stage (1): Anchor image synthesis')
 
-        '''Stage (1-1): Candidate images synthesis'''
-        print('Stage (1-1): Candidate images synthesis')
+        '''Stage (1-1): Candidate images synthesis using VAR'''
+        print('Stage (1-1): Candidate images synthesis using VAR')
 
-        # Prepare latent variables
-        num_channels_latents = self.unet.config.in_channels
-        latents = self.prepare_latents(
-            batch_size * num_images_per_prompt,
-            num_channels_latents,
-            video_length,
-            height,
-            width,
-            prompt_embeds.dtype,
-            device,
-            generator,
-            latents,)
-
-        # image generation preparation
-        latents = einops.rearrange(latents, "b c f h w -> (b f) c h w").contiguous().unsqueeze(2)
-
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-                # predict the noise residual
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=image_text_embeddings,
-                    # cross_attention_kwargs=cross_attention_kwargs,
-                ).sample
-                
-                # perform guidance
-                if do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
-                # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        callback(i, t, latents)
+        # Generate candidate images using VAR instead of diffusion
+        latents = self.generate_var_images(
+            num_candidate_images=video_length,
+            imagenet_class=imagenet_class,
+            device=device
+        )
 
         '''Stage (1-2): Anchor image selection'''
         print('Stage (1-2): Anchor image selection')
@@ -714,8 +740,13 @@ class VideoGenPipeline(DiffusionPipeline):
             candidate_image_pil = self.numpy_to_pil(candidate_image_pil)
             candidate_images_pil_list = candidate_images_pil_list + candidate_image_pil
 
+        # Use dummy prompt for reward model if no prompt provided
+        eval_prompt = prompt if prompt is not None else "a photo"
+        if isinstance(eval_prompt, list):
+            eval_prompt = eval_prompt[0]
+
         with torch.no_grad():
-            candidate_image_reward_scores = self.image_reward_model.score(prompt, candidate_images_pil_list)
+            candidate_image_reward_scores = self.image_reward_model.score(eval_prompt, candidate_images_pil_list)
             anchor_image_index, anchor_image_score = max(enumerate(candidate_image_reward_scores), key=lambda x: x[1])
             # print('[candidate_image_reward_scores]', candidate_image_reward_scores)
             print('Anchor image index:', anchor_image_index, 'Anchor image score:', anchor_image_score)
@@ -825,4 +856,3 @@ class VideoGenPipeline(DiffusionPipeline):
             ni_vsds_video       = self.decode_latents(ni_vsds_video_latents)
 
         return StableDiffusionPipelineOutput(video=video, candidate_images=candidate_images, ni_vsds_video=ni_vsds_video)
-
