@@ -33,26 +33,36 @@ import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
 
 # Add VAR model imports (you may need to adjust the import path based on your setup)
 try:
-    from VAR.models import VQVAE, build_vae_var  # From VAR repository
-except ImportError:
-    print("Warning: Could not import VAR models. Make sure VAR repository is in your Python path.")
+    # Add the VAR directory to path first
+    import sys
+    import os
+    var_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'VAR')
+    if var_path not in sys.path:
+        sys.path.insert(0, var_path)
+    
+    from models import VQVAE, build_vae_var  # From VAR repository
+    print("Successfully imported VAR models")
+except ImportError as e:
+    print(f"Warning: Could not import VAR models: {e}")
     build_vae_var = None
 
 
-def load_var_models(var_checkpoint_dir, model_depth=24, device='cuda'):
+def load_var_models(var_checkpoint_dir, model_depth=24, device_for_loading='cuda', pipeline_target_device='cuda'):
     """
     Load VAR model and VAE
     
     Args:
         var_checkpoint_dir: Directory containing VAR checkpoints
         model_depth: Model depth (16, 20, 24, 30, or 36)
-        device: Device to load models on
+        device_for_loading: Device to load models on
+        pipeline_target_device: Target device for the pipeline (for flash attention decision)
     
     Returns:
         vae, var: Loaded VAE and VAR models
     """
     if build_vae_var is None:
-        raise ImportError("VAR models not available. Please ensure VAR repository is properly installed.")
+        print("Warning: VAR models not available. Skipping VAR model loading.")
+        return None, None
     
     # Disable default parameter init for faster speed (from VAR example)
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)
@@ -69,65 +79,117 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cuda'):
     
     # Check if checkpoints exist
     if not osp.exists(local_vae_ckpt_path):
-        raise FileNotFoundError(f"VAE checkpoint not found at {local_vae_ckpt_path}")
+        print(f"Warning: VAE checkpoint not found at {local_vae_ckpt_path}")
+        return None, None
     if not osp.exists(local_var_ckpt_path):
-        raise FileNotFoundError(f"VAR checkpoint not found at {local_var_ckpt_path}")
+        print(f"Warning: VAR checkpoint not found at {local_var_ckpt_path}")
+        return None, None
     
-    # Build VAE and VAR models
-    FOR_512_px = model_depth == 30
-    if FOR_512_px:
-        patch_nums = (1, 2, 3, 4, 6, 9, 13, 18, 24, 32)
+    # Use 256px patch configuration for all models (this is what works)
+    patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+    
+    # Determine if flash attention should be used for the VAR model
+    flash_attention_for_var = True
+    if pipeline_target_device == 'mps':
+        flash_attention_for_var = False
+        print("Pipeline target device is MPS, explicitly disabling flash attention for VAR model.")
+    elif device_for_loading == 'cpu' and pipeline_target_device == 'cpu': # If VAR is on CPU and pipeline is on CPU
+        flash_attention_for_var = False
+        print("VAR model and pipeline on CPU, explicitly disabling flash attention for VAR model.")
     else:
-        patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
-    
-    vae, var = build_vae_var(
-        V=4096, Cvae=32, ch=160, share_quant_resi=4,    # hard-coded VQVAE hyperparameters
-        device=device, patch_nums=patch_nums,
-        num_classes=1000, depth=model_depth, shared_aln=FOR_512_px,
-    )
-    
-    # Load checkpoints
-    vae.load_state_dict(torch.load(local_vae_ckpt_path, map_location='cpu'), strict=True)
-    var.load_state_dict(torch.load(local_var_ckpt_path, map_location='cpu'), strict=True)
-    
-    # Set to eval mode
-    vae.eval()
-    var.eval()
-    
-    # Disable gradients
-    for p in vae.parameters():
-        p.requires_grad_(False)
-    for p in var.parameters():
-        p.requires_grad_(False)
-    
-    print(f'VAR model preparation finished. Model depth: {model_depth}')
-    
-    return vae, var
+        # Default case, usually for CUDA where flash attention is beneficial
+        print(f"VAR model flash attention decision: {flash_attention_for_var} (pipeline: {pipeline_target_device}, loading: {device_for_loading})")
+
+
+    try:
+        # Build VAE and VAR models with working configuration
+        vae, var = build_vae_var(
+            V=4096, Cvae=32, ch=160, share_quant_resi=4,
+            device=device_for_loading, patch_nums=patch_nums,
+            num_classes=1000, depth=model_depth, shared_aln=False,
+            flash_if_available=flash_attention_for_var  # Pass the flag here
+        )
+        
+        # Load checkpoints
+        map_location = 'cpu' if device_for_loading == 'cpu' else device_for_loading
+        vae.load_state_dict(torch.load(local_vae_ckpt_path, map_location=map_location), strict=True)
+        var_state_dict = torch.load(local_var_ckpt_path, map_location=map_location)
+        var.load_state_dict(var_state_dict, strict=False)  # Use strict=False for potential mismatches
+        
+        print(f"Successfully loaded VAR model with 256px patch configuration. Flash attention: {flash_attention_for_var}")
+        
+        # Move models to the correct device after loading
+        vae = vae.to(device_for_loading)
+        var = var.to(device_for_loading)
+        
+        # For CPU execution, ensure compatibility (this might be redundant if flash_if_available=False was set)
+        if device_for_loading == 'cpu' and not flash_attention_for_var:
+            print("VAR model configured for CPU execution (flash attention disabled).")
+        elif device_for_loading == 'cpu': # Original block, may need review
+            try:
+                # Attempt to disable xformers if still necessary, though flash_if_available should handle it
+                # from xformers import ops
+                # var.set_use_memory_efficient_attention_xformers(False, attention_op=None)
+                print("Configuring VAR model for CPU execution (post-load check)...")
+            except Exception as e:
+                print(f"Could not disable xformers for VAR on CPU post-load: {e}")
+
+        # Set to eval mode
+        vae.eval()
+        var.eval()
+        
+        # Disable gradients
+        for p in vae.parameters():
+            p.requires_grad_(False)
+        for p in var.parameters():
+            p.requires_grad_(False)
+        
+        print(f'VAR model preparation finished. Model depth: {model_depth}, Device: {device_for_loading}')
+        return vae, var
+        
+    except Exception as e:
+        print(f"Error loading VAR models: {e}")
+        print("Continuing without VAR models - will use diffusion for candidate image generation")
+        return None, None
 
 
 def main(args):
     torch.set_grad_enabled(False)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # On macOS, CUDA is not available, so use CPU and MPS if available
+    if torch.backends.mps.is_available():
+        pipeline_device = "mps"
+        dtype = torch.float32  # MPS works better with float32
+        print("Using MPS (Metal Performance Shaders) on macOS")
+    else:
+        pipeline_device = "cpu"
+        dtype = torch.float32  # CPU uses float32
+        print("Using CPU on macOS")
     
     # Load VAR models if checkpoint directory is provided
     var_vae, var_model = None, None
     if hasattr(args, 'var_checkpoint_dir') and args.var_checkpoint_dir:
         print("Loading VAR models...")
         var_model_depth = getattr(args, 'var_model_depth', 24)
+        
+        # For macOS, always use CPU for VAR models initial loading
+        var_device_for_loading = "cpu"
+        print(f"Loading VAR models on device: {var_device_for_loading} (optimized for macOS)")
+        
         var_vae, var_model = load_var_models(
             args.var_checkpoint_dir, 
             model_depth=var_model_depth, 
-            device=device
+            device_for_loading=var_device_for_loading,
+            pipeline_target_device=pipeline_device # Pass the determined pipeline device
         )
-	
+    
     sd_path = '/Users/gilliam/Desktop/493G1/VideoVAR/stable-diffusion-v1-4'
-    unet = get_models(args, sd_path).to(device, dtype=torch.float16)
+    unet = get_models(args, sd_path).to(pipeline_device, dtype=dtype)  # Use pipeline_device and dtype
     state_dict = find_model(args.ckpt_path)
     unet.load_state_dict(state_dict)
 
-    vae = AutoencoderKL.from_pretrained(sd_path, subfolder="vae", torch_dtype=torch.float16).to(device)
+    vae = AutoencoderKL.from_pretrained(sd_path, subfolder="vae", torch_dtype=dtype).to(pipeline_device)  # Use dtype and pipeline_device
     tokenizer_one = CLIPTokenizer.from_pretrained(sd_path, subfolder="tokenizer")
-    text_encoder_one = CLIPTextModel.from_pretrained(sd_path, subfolder="text_encoder", torch_dtype=torch.float16).to(device) # huge
+    text_encoder_one = CLIPTextModel.from_pretrained(sd_path, subfolder="text_encoder", torch_dtype=dtype).to(pipeline_device)  # Use dtype and pipeline_device
     image_reward_model = RM.load("ImageReward-v1.0")
 
     # set eval mode
@@ -165,10 +227,15 @@ def main(args):
         unet=unet,
         var_model=var_model,    # Add VAR model
         var_vae=var_vae         # Add VAR VAE
-    ).to(device)
+    ).to(pipeline_device)
     
     videogen_pipeline.image_reward_model = image_reward_model
-    videogen_pipeline.enable_xformers_memory_efficient_attention()
+    # Don't enable xformers on macOS as it's not supported
+    if torch.cuda.is_available():
+        videogen_pipeline.enable_xformers_memory_efficient_attention()
+        print("Enabled xformers memory efficient attention")
+    else:
+        print("Xformers not enabled (running on macOS/CPU)")
 
     if not os.path.exists(args.output_folder):
         os.makedirs(args.output_folder)

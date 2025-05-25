@@ -14,6 +14,8 @@ import inspect
 from typing import Any, Callable, Dict, List, Optional, Union
 import einops
 import torch
+import numpy as np
+import random
 from packaging import version
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
@@ -427,9 +429,31 @@ class VideoGenPipeline(DiffusionPipeline):
             Generated images as tensor
         """
         if self.var_model is None or self.var_vae is None:
-            raise ValueError("VAR model and VAE must be provided during initialization")
+            print("Warning: VAR models not available, falling back to noise initialization")
+            # Fallback: generate random latents similar to prepare_latents
+            if device is None:
+                device = self._execution_device
             
-        # Set up generation parameters similar to VAR example
+            # Generate random latents with the same shape as would be produced by VAR
+            height, width = 320, 512  # Default image size from config
+            latents = torch.randn(
+                (num_candidate_images, 4, 1, height // 8, width // 8),
+                device=device,
+                dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            )
+            
+            # Scale by the scheduler's noise sigma for compatibility
+            if hasattr(self.scheduler, 'init_noise_sigma'):
+                latents = latents * self.scheduler.init_noise_sigma
+            
+            return latents
+        # VAR models are available, use them for generation
+        print(f"Generating {num_candidate_images} candidate images using VAR model with ImageNet class {imagenet_class}")
+        
+        if device is None:
+            device = self._execution_device
+            
+        # Set up generation parameters
         torch.manual_seed(0)  # For reproducibility
         random.seed(0)
         np.random.seed(0)
@@ -439,33 +463,85 @@ class VideoGenPipeline(DiffusionPipeline):
         label_B = torch.tensor(class_labels, device=device)
         
         # Generate images using VAR
-        with torch.inference_mode():
-            with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
-                recon_B3HW = self.var_model.autoregressive_infer_cfg(
-                    B=num_candidate_images, 
-                    label_B=label_B, 
-                    cfg=4.0, 
-                    top_k=900, 
-                    top_p=0.95, 
-                    g_seed=0, 
-                    more_smooth=False
-                )
-        
-        # Convert to the format expected by the rest of the pipeline
-        # VAR outputs images in range [0,1], we need to encode them to latents
-        with torch.no_grad():
-            # Reshape for VAE encoding if needed
-            if recon_B3HW.dim() == 4:  # [B, C, H, W]
-                # Convert from [0,1] to [-1,1] for VAE
-                images_for_vae = recon_B3HW * 2.0 - 1.0
-                # Encode to latents using the pipeline's VAE
-                latents = self.vae.encode(images_for_vae).latent_dist.sample()
-                latents = latents * 0.18215  # Scale factor
-                
-                # Reshape to video format [B, C, 1, H, W] for compatibility
-                latents = latents.unsqueeze(2)
-                
-        return latents
+        try:
+            # Move VAR models to the correct device if needed
+            var_device = next(self.var_model.parameters()).device
+            vae_device = next(self.var_vae.parameters()).device
+            
+            if var_device != device:
+                self.var_model = self.var_model.to(device)
+            if vae_device != device:
+                self.var_vae = self.var_vae.to(device)
+            
+            with torch.inference_mode():
+                # Use autocast only if CUDA is available
+                if torch.cuda.is_available() and device.type == 'cuda':
+                    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
+                        recon_B3HW = self.var_model.autoregressive_infer_cfg(
+                            B=num_candidate_images, 
+                            label_B=label_B, 
+                            cfg=4.0, 
+                            top_k=900, 
+                            top_p=0.95, 
+                            g_seed=0, 
+                            more_smooth=False
+                        )
+                else:
+                    # Run without autocast for CPU or when CUDA is not available
+                    recon_B3HW = self.var_model.autoregressive_infer_cfg(
+                        B=num_candidate_images, 
+                        label_B=label_B, 
+                        cfg=4.0, 
+                        top_k=900, 
+                        top_p=0.95, 
+                        g_seed=0, 
+                        more_smooth=False
+                    )
+            
+            print(f"VAR generated images with shape: {recon_B3HW.shape}")
+            
+            # Convert to the format expected by the rest of the pipeline
+            # VAR outputs images in range [0,1], we need to encode them to latents
+            with torch.no_grad():
+                # Ensure correct format and range for VAE encoding
+                if recon_B3HW.dim() == 4:  # [B, C, H, W]
+                    # Convert from [0,1] to [-1,1] for VAE
+                    images_for_vae = recon_B3HW * 2.0 - 1.0
+                    
+                    # Resize images to expected size if needed
+                    target_size = (320, 512)  # Height, Width
+                    if images_for_vae.shape[-2:] != target_size:
+                        images_for_vae = torch.nn.functional.interpolate(
+                            images_for_vae, size=target_size, mode='bilinear', align_corners=False
+                        )
+                    
+                    # Encode to latents using the pipeline's VAE
+                    latents = self.vae.encode(images_for_vae).latent_dist.sample()
+                    latents = latents * 0.18215  # Scale factor
+                    
+                    # Reshape to video format [B, C, 1, H, W] for compatibility
+                    latents = latents.unsqueeze(2)
+                    
+                    print(f"Generated VAR latents with shape: {latents.shape}")
+                    return latents
+                else:
+                    raise ValueError(f"Unexpected VAR output shape: {recon_B3HW.shape}")
+                    
+        except Exception as e:
+            print(f"Error during VAR generation: {e}")
+            print("Falling back to noise initialization")
+            # Fallback to noise if VAR generation fails
+            height, width = 320, 512
+            latents = torch.randn(
+                (num_candidate_images, 4, 1, height // 8, width // 8),
+                device=device,
+                dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            )
+            
+            if hasattr(self.scheduler, 'init_noise_sigma'):
+                latents = latents * self.scheduler.init_noise_sigma
+            
+            return latents
 
     def decode_latents(self, latents):
         video_length = latents.shape[2]

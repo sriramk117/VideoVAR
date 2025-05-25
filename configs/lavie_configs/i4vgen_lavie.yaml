@@ -2,6 +2,11 @@
 ckpt_path: "/Users/gilliam/Desktop/493G1/VideoVAR/lavie_base.pt"
 output_folder: "./samples/lavie/"
 
+# VAR config:
+var_checkpoint_dir: "/Users/gilliam/Desktop/493G1/VideoVAR/VAR/"
+var_model_depth: 30
+imagenet_class: 980
+
 # model config: 
 model: UNet
 video_length: 16
