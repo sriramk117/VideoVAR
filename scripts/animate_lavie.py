@@ -11,6 +11,8 @@ import argparse
 import torchvision
 import random
 import numpy as np
+import numpy as np
+from PIL import Image
 
 from i4vgen.lavie.pipelines.pipeline_videogen import VideoGenPipeline
 
@@ -50,11 +52,12 @@ except ImportError as e:
 def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torch.float32):
     """
     Load VAR model and VAE for Mac compatibility
+    Note: For MPS, we keep models on CPU to avoid dtype issues
     
     Args:
         var_checkpoint_dir: Directory containing VAR checkpoints
         model_depth: Model depth (16, 20, 24, 30, or 36)
-        device: Device to load models on ('cpu' or 'mps')
+        device: Device to load models on (for MPS, we'll use CPU)
         dtype: Data type for models
     
     Returns:
@@ -63,6 +66,13 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
     if build_vae_var is None:
         print("Warning: VAR models not available. Skipping VAR model loading.")
         return None, None
+    
+    # For MPS, always use CPU for VAR to avoid dtype issues
+    if device == 'mps':
+        print("Note: Loading VAR models on CPU to avoid MPS dtype issues")
+        var_device = 'cpu'
+    else:
+        var_device = device
     
     # Disable default parameter init for faster speed
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)
@@ -112,11 +122,13 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
         vae = vae.to(dtype=dtype)
         var = var.to(dtype=dtype)
         
-        # Move to target device
-        if device != 'cpu':
-            vae = vae.to(device)
-            var = var.to(device)
-            print(f"Moved VAR models to {device}")
+        # Move to target device (CPU for MPS to avoid issues)
+        if var_device != 'cpu':
+            vae = vae.to(var_device)
+            var = var.to(var_device)
+            print(f"Moved VAR models to {var_device}")
+        else:
+            print("Keeping VAR models on CPU")
         
         # Set to eval mode
         vae.eval()
@@ -128,7 +140,7 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
         for p in var.parameters():
             p.requires_grad_(False)
         
-        print(f'VAR model preparation finished. Model depth: {model_depth}, Device: {device}')
+        print(f'VAR model preparation finished. Model depth: {model_depth}, Device: {var_device}')
         return vae, var
         
     except Exception as e:
@@ -145,6 +157,8 @@ def main(args):
         device = "mps"
         dtype = torch.float32  # MPS works better with float32
         print("Using MPS (Metal Performance Shaders) on macOS")
+        # Set default dtype to float32 for MPS compatibility
+        torch.set_default_dtype(torch.float32)
     else:
         device = "cpu"
         dtype = torch.float32
@@ -249,37 +263,65 @@ def main(args):
             try:
                 # Generate video
                 with torch.no_grad():
-                    if device == "mps":
-                        # Use autocast for MPS
-                        with torch.autocast("mps", dtype=torch.float16):
-                            sample = videogen_pipeline(
-                                prompt=prompt, 
-                                video_length=args.video_length, 
-                                height=args.image_size[0], 
-                                width=args.image_size[1], 
-                                num_inference_steps=args.num_sampling_steps,
-                                guidance_scale=args.guidance_scale,
-                                use_fp16=False,  # Disable fp16 for Mac
-                                imagenet_class=imagenet_class
-                            )
-                    else:
-                        sample = videogen_pipeline(
-                            prompt=prompt, 
-                            video_length=args.video_length, 
-                            height=args.image_size[0], 
-                            width=args.image_size[1], 
-                            num_inference_steps=args.num_sampling_steps,
-                            guidance_scale=args.guidance_scale,
-                            use_fp16=False,  # Disable fp16 for Mac
-                            imagenet_class=imagenet_class
-                        )
+                    # Don't use autocast for MPS to avoid dtype mixing issues
+                    sample = videogen_pipeline(
+                        prompt=prompt, 
+                        video_length=args.video_length, 
+                        height=args.image_size[0], 
+                        width=args.image_size[1], 
+                        num_inference_steps=args.num_sampling_steps,
+                        guidance_scale=args.guidance_scale,
+                        use_fp16=False,  # Disable fp16 for Mac
+                        imagenet_class=imagenet_class
+                    )
                 
-                # Save video
+                # Save video with Mac-compatible codec
                 videos = sample.video
                 video_mp4_name = os.path.join(args.output_folder, f"{prompt.replace(' ', '_')}-{cur_seed}.mp4")
                 video_mp4 = videos[0]
-                torchvision.io.write_video(video_mp4_name, video_mp4, fps=8)
-                print(f'Saved video: {video_mp4_name}')
+                
+                # Save video with Mac-compatible methods
+                video_saved = False
+                
+                # First, ensure video tensor is in correct format (T, H, W, C) with uint8
+                if video_mp4.dtype != torch.uint8:
+                    video_mp4 = video_mp4.clamp(0, 255).to(torch.uint8)
+                
+                # Try torchvision with available codecs
+                codecs_to_try = ['h264_videotoolbox', 'mpeg4', 'libopenh264']
+                for codec in codecs_to_try:
+                    try:
+                        torchvision.io.write_video(video_mp4_name, video_mp4, fps=8, video_codec=codec)
+                        print(f'Saved video ({codec}): {video_mp4_name}')
+                        video_saved = True
+                        break
+                    except Exception as e:
+                        print(f'Failed to save with {codec}: {str(e)[:50]}...')
+                        continue
+                
+                # If torchvision fails, try imageio
+                if not video_saved:
+                    try:
+                        # Convert to numpy for imageio
+                        video_np = video_mp4.numpy()
+                        imageio.mimsave(video_mp4_name, video_np, fps=8, codec='libx264')
+                        print(f'Saved video (imageio): {video_mp4_name}')
+                        video_saved = True
+                    except Exception as e:
+                        print(f'Failed to save with imageio: {str(e)[:50]}...')
+                
+                # Final fallback: save as individual frames
+                if not video_saved:
+                    print(f"All video codecs failed, saving individual frames...")
+                    frames_dir = os.path.join(args.output_folder, f"{prompt.replace(' ', '_')}-{cur_seed}_frames")
+                    os.makedirs(frames_dir, exist_ok=True)
+                    for frame_idx, frame in enumerate(video_mp4):
+                        frame_path = os.path.join(frames_dir, f"frame_{frame_idx:04d}.png")
+                        # Convert frame to PIL Image and save
+                        frame_np = frame.numpy().astype(np.uint8)
+                        frame_pil = Image.fromarray(frame_np)
+                        frame_pil.save(frame_path)
+                    print(f'Saved video frames to: {frames_dir}')
 
                 # Save candidate images if requested
                 if getattr(args, 'save_candidate_images', False):
@@ -295,8 +337,49 @@ def main(args):
                     ni_vsds_video = sample.ni_vsds_video
                     video_mp4_name = os.path.join(args.output_folder, f"{prompt.replace(' ', '_')}-{cur_seed}-ni-vsds-video.mp4")
                     video_mp4 = ni_vsds_video[0]
-                    torchvision.io.write_video(video_mp4_name, video_mp4, fps=8)
-                    print(f'Saved NI-VSDS video: {video_mp4_name}')
+                    
+                    # Save NI-VSDS video with Mac-compatible methods
+                    ni_vsds_video_saved = False
+                    
+                    # First, ensure video tensor is in correct format (T, H, W, C) with uint8
+                    if video_mp4.dtype != torch.uint8:
+                        video_mp4 = video_mp4.clamp(0, 255).to(torch.uint8)
+                    
+                    # Try torchvision with available codecs
+                    codecs_to_try = ['h264_videotoolbox', 'mpeg4', 'libopenh264']
+                    for codec in codecs_to_try:
+                        try:
+                            torchvision.io.write_video(video_mp4_name, video_mp4, fps=8, video_codec=codec)
+                            print(f'Saved NI-VSDS video ({codec}): {video_mp4_name}')
+                            ni_vsds_video_saved = True
+                            break
+                        except Exception as e:
+                            print(f'Failed to save NI-VSDS video with {codec}: {str(e)[:50]}...')
+                            continue
+                    
+                    # If torchvision fails, try imageio
+                    if not ni_vsds_video_saved:
+                        try:
+                            # Convert to numpy for imageio
+                            video_np = video_mp4.numpy()
+                            imageio.mimsave(video_mp4_name, video_np, fps=8, codec='libx264')
+                            print(f'Saved NI-VSDS video (imageio): {video_mp4_name}')
+                            ni_vsds_video_saved = True
+                        except Exception as e:
+                            print(f'Failed to save NI-VSDS video with imageio: {str(e)[:50]}...')
+                    
+                    # Final fallback: save as individual frames
+                    if not ni_vsds_video_saved:
+                        print(f"All video codecs failed for NI-VSDS video, saving individual frames...")
+                        frames_dir = os.path.join(args.output_folder, f"{prompt.replace(' ', '_')}-{cur_seed}-ni-vsds_frames")
+                        os.makedirs(frames_dir, exist_ok=True)
+                        for frame_idx, frame in enumerate(video_mp4):
+                            frame_path = os.path.join(frames_dir, f"frame_{frame_idx:04d}.png")
+                            # Convert frame to PIL Image and save
+                            frame_np = frame.numpy().astype(np.uint8)
+                            frame_pil = Image.fromarray(frame_np)
+                            frame_pil.save(frame_path)
+                        print(f'Saved NI-VSDS video frames to: {frames_dir}')
                     
             except Exception as e:
                 print(f"Error generating video for prompt '{prompt}': {e}")

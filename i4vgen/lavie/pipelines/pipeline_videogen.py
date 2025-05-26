@@ -416,7 +416,7 @@ class VideoGenPipeline(DiffusionPipeline):
 
     def generate_var_images(self, num_candidate_images, imagenet_class=980, device=None):
         """
-        Generate candidate images using VAR model with Mac compatibility
+        Generate candidate images using VAR model with Mac/MPS compatibility
         
         Args:
             num_candidate_images: Number of candidate images to generate
@@ -437,7 +437,7 @@ class VideoGenPipeline(DiffusionPipeline):
             latents = torch.randn(
                 (num_candidate_images, 4, 1, height // 8, width // 8),
                 device=device,
-                dtype=torch.float32  # Use float32 for Mac compatibility
+                dtype=torch.float32  # Always use float32 for compatibility
             )
             
             # Scale by the scheduler's noise sigma for compatibility
@@ -461,63 +461,49 @@ class VideoGenPipeline(DiffusionPipeline):
         label_B = torch.tensor(class_labels, device=device, dtype=torch.long)
         
         try:
-            # Ensure VAR models are on the correct device
-            var_device = next(self.var_model.parameters()).device
-            vae_device = next(self.var_vae.parameters()).device
-            
-            if var_device != device:
-                self.var_model = self.var_model.to(device)
-            if vae_device != device:
-                self.var_vae = self.var_vae.to(device)
+            # For MPS, we need to ensure all operations use consistent dtypes
+            # VAR models should be in float32 for MPS compatibility
+            if device.type == 'mps':
+                # Ensure models are in float32
+                self.var_model = self.var_model.float()
+                self.var_vae = self.var_vae.float()
+                
+                # Move to CPU for generation to avoid MPS issues
+                print("Moving VAR generation to CPU to avoid MPS dtype issues...")
+                self.var_model = self.var_model.cpu()
+                self.var_vae = self.var_vae.cpu()
+                label_B = label_B.cpu()
+                generation_device = 'cpu'
+            else:
+                generation_device = device
+                # Ensure VAR models are on the correct device
+                var_device = next(self.var_model.parameters()).device
+                vae_device = next(self.var_vae.parameters()).device
+                
+                if var_device != device:
+                    self.var_model = self.var_model.to(device)
+                if vae_device != device:
+                    self.var_vae = self.var_vae.to(device)
             
             # Generate images using VAR
             with torch.no_grad():
-                # Check if we're on MPS and handle accordingly
-                if device.type == 'mps':
-                    # MPS doesn't support all operations, so we might need to use CPU for generation
-                    # and then move to MPS
-                    try:
-                        recon_B3HW = self.var_model.autoregressive_infer_cfg(
-                            B=num_candidate_images, 
-                            label_B=label_B, 
-                            cfg=4.0, 
-                            top_k=900, 
-                            top_p=0.95, 
-                            g_seed=0,  # Use g_seed parameter
-                            more_smooth=False
-                        )
-                    except Exception as e:
-                        print(f"MPS generation failed, falling back to CPU: {e}")
-                        # Move to CPU for generation
-                        self.var_model = self.var_model.cpu()
-                        self.var_vae = self.var_vae.cpu()
-                        label_B = label_B.cpu()
-                        
-                        recon_B3HW = self.var_model.autoregressive_infer_cfg(
-                            B=num_candidate_images, 
-                            label_B=label_B, 
-                            cfg=4.0, 
-                            top_k=900, 
-                            top_p=0.95, 
-                            g_seed=0,
-                            more_smooth=False
-                        )
-                        
-                        # Move result back to MPS
-                        recon_B3HW = recon_B3HW.to(device)
-                        self.var_model = self.var_model.to(device)
-                        self.var_vae = self.var_vae.to(device)
-                else:
-                    # For CPU or CUDA
-                    recon_B3HW = self.var_model.autoregressive_infer_cfg(
-                        B=num_candidate_images, 
-                        label_B=label_B, 
-                        cfg=4.0, 
-                        top_k=900, 
-                        top_p=0.95, 
-                        g_seed=0,
-                        more_smooth=False
-                    )
+                # Generate on CPU if using MPS to avoid dtype issues
+                recon_B3HW = self.var_model.autoregressive_infer_cfg(
+                    B=num_candidate_images, 
+                    label_B=label_B, 
+                    cfg=4.0, 
+                    top_k=900, 
+                    top_p=0.95, 
+                    g_seed=0,
+                    more_smooth=False
+                )
+                
+                # Move result back to target device if needed
+                if generation_device == 'cpu' and device.type == 'mps':
+                    recon_B3HW = recon_B3HW.to(device)
+                    # Move models back to MPS for later use
+                    self.var_model = self.var_model.to(device)
+                    self.var_vae = self.var_vae.to(device)
             
             print(f"VAR generated images with shape: {recon_B3HW.shape}")
             
@@ -526,7 +512,7 @@ class VideoGenPipeline(DiffusionPipeline):
                 # VAR outputs images in range [0,1], convert to [-1,1] for VAE
                 images_for_vae = recon_B3HW * 2.0 - 1.0
                 
-                # Ensure float32 for stability
+                # Ensure float32 for all operations
                 images_for_vae = images_for_vae.float()
                 
                 # Resize if needed
@@ -537,16 +523,20 @@ class VideoGenPipeline(DiffusionPipeline):
                     )
                 
                 # Encode to latents using the pipeline's VAE
-                # Use the pipeline's VAE, not the VAR VAE
+                # Ensure VAE is also in float32
+                self.vae = self.vae.float()
                 latents = self.vae.encode(images_for_vae).latent_dist.sample()
                 latents = latents * 0.18215  # Scale factor
                 
                 # Reshape to video format [B, C, 1, H, W]
                 latents = latents.unsqueeze(2)
                 
-                print(f"Generated VAR latents with shape: {latents.shape}")
-                return latents
+                # Ensure float32
+                latents = latents.float()
                 
+                print(f"Generated VAR latents with shape: {latents.shape}, dtype: {latents.dtype}")
+                return latents
+            
         except Exception as e:
             print(f"Error during VAR generation: {e}")
             print("Falling back to noise initialization")
@@ -925,7 +915,7 @@ class VideoGenPipeline(DiffusionPipeline):
         print('Stage (2-2): Video regeneration')
         noise = torch.randn_like(latents)
 
-        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength=p_re, device='cuda')
+        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength=p_re, device=device)
 
         latent_timestep = timesteps[:1].repeat(1 * 1)
         # latent_timestep = torch.tensor([999]).cuda()
