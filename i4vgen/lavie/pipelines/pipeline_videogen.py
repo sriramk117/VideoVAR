@@ -18,6 +18,7 @@ import einops
 import torch
 import numpy as np
 import random
+import torchvision.transforms as T
 from packaging import version
 from PIL import Image
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
@@ -514,6 +515,17 @@ class VideoGenPipeline(DiffusionPipeline):
                 
                 # Ensure float32 for all operations
                 images_for_vae = images_for_vae.float()
+
+                print(f"Images for VAE with shape: {images_for_vae.shape}, dtype: {images_for_vae.dtype}")
+
+                # Multiply by 255 to visualize
+                images_for_vae_viz = images_for_vae * 255.0
+                images_for_vae_viz = images_for_vae_viz.clamp(0, 255).to(torch.uint8)
+                
+                # Image PIL visualize VAR-generated image
+                transform = T.ToPILImage()
+                images_for_vae_viz = transform(images_for_vae_viz[0].cpu())
+                images_for_vae_viz.show()
                 
                 # Resize if needed
                 target_size = (320, 512)  # Height, Width
@@ -821,11 +833,14 @@ class VideoGenPipeline(DiffusionPipeline):
         print('Stage (1-1): Candidate images synthesis using VAR')
 
         # Generate candidate images using VAR instead of diffusion
+        
         latents = self.generate_var_images(
-            num_candidate_images=video_length,
+            num_candidate_images=1, # video_length
             imagenet_class=imagenet_class,
             device=device
         )
+        
+        raise NotImplementedError("VAR image generation is not implemented in this pipeline. Please implement the VAR model and VAE for image generation.") 
 
         '''Stage (1-2): Anchor image selection'''
         print('Stage (1-2): Anchor image selection')
