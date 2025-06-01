@@ -48,6 +48,9 @@ except ImportError as e:
     print(f"Warning: Could not import VAR models: {e}")
     build_vae_var = None
 
+# add functionality to support gpu's at inference
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torch.float32):
     """
