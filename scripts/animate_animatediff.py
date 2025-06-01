@@ -26,6 +26,9 @@ from pathlib import Path
 
 import ImageReward as RM
 
+# adding for compatibility with gpu's at inference
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 def main(args):
     *_, func_args = inspect.getargvalues(inspect.currentframe())
