@@ -54,13 +54,16 @@ def main(args):
             unet                = UNet3DConditionModel.from_pretrained_2d(args.pretrained_model_path, subfolder="unet", unet_additional_kwargs=OmegaConf.to_container(inference_config.unet_additional_kwargs))
             image_reward_model  = RM.load("ImageReward-v1.0")
 
-            if is_xformers_available(): unet.enable_xformers_memory_efficient_attention()
-            else: assert False
-
             pipeline = AnimationPipeline(
                 image_reward_model=image_reward_model, vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
                 scheduler=DDIMScheduler(**OmegaConf.to_container(inference_config.noise_scheduler_kwargs)),
-            ).to("cuda")
+            ).to(device)
+
+            if is_xformers_available() and device.type == "cuda":
+               pipeline.unet.enable_xformers_memory_efficient_attention()
+               print("Xformers memory efficient attention enabled")
+            else:
+               print("Xformers not available or not on CUDA, using standard attention")     
 
             pipeline = load_weights(
                 pipeline,
