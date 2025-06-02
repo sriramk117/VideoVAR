@@ -28,7 +28,7 @@ guidance_scale: 3.0
 sample_method: 'ddpm'
 num_sampling_steps: 50
 text_prompt: [
-       'A volleyball ball rolling and bouncing',
-       'A volleyball moving in slow motion',
-       'A round white volleyball spinning slowly',
+       'A volcano erupting with lava flowing down its sides',
+       'A volcano exploding with ash and smoke',
+       'A volcano with a crater filled with molten lava',
 ] 

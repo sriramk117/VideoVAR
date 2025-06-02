@@ -415,7 +415,7 @@ class VideoGenPipeline(DiffusionPipeline):
 
         return prompt_embeds
 
-    def generate_var_images(self, num_candidate_images, imagenet_class=980, device=None):
+    def generate_var_images(self, num_candidate_images, imagenet_class, device=None):
         """
         Generate candidate images using VAR model with Mac/MPS compatibility
         
@@ -452,10 +452,13 @@ class VideoGenPipeline(DiffusionPipeline):
         if device is None:
             device = self._execution_device
         
-        # Set up generation parameters
-        torch.manual_seed(0)  # For reproducibility
-        random.seed(0)
-        np.random.seed(0)
+        # Set up generation parameters with random seeds
+        import time
+        seed = int(time.time()) % 2**32  # Use timestamp-based seed
+        torch.manual_seed(seed)
+        random.seed(seed) 
+        np.random.seed(seed)
+        print(f"Using random seed for VAR generation: {seed}")
         
         # Generate class labels
         class_labels = [imagenet_class] * num_candidate_images
@@ -495,7 +498,7 @@ class VideoGenPipeline(DiffusionPipeline):
                     cfg=4.0, 
                     top_k=900, 
                     top_p=0.95, 
-                    g_seed=0,
+                    g_seed=seed,
                     more_smooth=False
                 )
                 
@@ -544,76 +547,7 @@ class VideoGenPipeline(DiffusionPipeline):
                 
                 # Also print ImageNet class information
                 print(f"Generated {num_candidate_images} images using ImageNet class {imagenet_class}")
-                
-                # Let's look up what class 980 actually is
-                imagenet_classes = {
-                    980: "volleyball",
-                    151: "Chihuahua", 
-                    152: "Japanese spaniel",
-                    153: "Maltese dog, Maltese terrier, Maltese", 
-                    154: "Pekinese, Pekingese, Peke",
-                    155: "Shih-Tzu",
-                    156: "Blenheim spaniel",
-                    157: "papillon",
-                    158: "toy terrier",
-                    159: "Rhodesian ridgeback",
-                    160: "Afghan hound, Afghan",
-                    161: "basset, basset hound",
-                    162: "beagle",
-                    163: "bloodhound, sleuthhound",
-                    164: "bluetick",
-                    165: "black-and-tan coonhound",
-                    166: "Walker hound, Walker foxhound",
-                    167: "English foxhound",
-                    168: "redbone",
-                    169: "borzoi, Russian wolfhound",
-                    170: "Irish wolfhound",
-                    171: "Italian greyhound",
-                    172: "whippet",
-                    173: "Ibizan hound, Ibizan Podenco",
-                    174: "Norwegian elkhound, elkhound",
-                    175: "otterhound, otter hound",
-                    176: "Saluki, gazelle hound",
-                    177: "Scottish deerhound, deerhound",
-                    178: "Weimaraner",
-                    179: "Staffordshire bullterrier, Staffordshire bull terrier",
-                    180: "American Staffordshire terrier, Staffordshire terrier, American pit bull terrier, pit bull terrier",
-                    181: "Bedlington terrier",
-                    182: "Border terrier",
-                    183: "Kerry blue terrier",
-                    184: "Irish terrier",
-                    185: "Norfolk terrier",
-                    186: "Norwich terrier",
-                    187: "Yorkshire terrier",
-                    188: "wire-haired fox terrier",
-                    189: "Lakeland terrier",
-                    190: "Sealyham terrier, Sealyham",
-                    191: "Airedale, Airedale terrier",
-                    192: "cairn, cairn terrier",
-                    193: "Australian terrier",
-                    194: "Dandie Dinmont, Dandie Dinmont terrier",
-                    195: "Boston bull, Boston terrier",
-                    196: "miniature schnauzer",
-                    197: "giant schnauzer",
-                    198: "standard schnauzer",
-                    199: "Scotch terrier, Scottish terrier, Scottie",
-                    200: "Tibetan terrier, chrysanthemum dog",
-                    201: "silky terrier, Sydney silky",
-                    202: "soft-coated wheaten terrier",
-                    203: "West Highland white terrier",
-                    204: "Lhasa, Lhasa apso",
-                    205: "flat-coated retriever",
-                    206: "curly-coated retriever",
-                    207: "golden retriever",
-                    208: "Labrador retriever",
-                    209: "Chesapeake Bay retriever",
-                    210: "German short-haired pointer",
-                    211: "vizsla, Hungarian pointer"
-                }
-                
-                class_name = imagenet_classes.get(imagenet_class, f"Unknown class {imagenet_class}")
-                print(f"ImageNet class {imagenet_class} corresponds to: {class_name}")
-                print(f"Note: For 'golden retriever', you should use class 207 instead of {imagenet_class}")
+            
                 
                 # Resize if needed
                 target_size = (320, 512)  # Height, Width
@@ -794,7 +728,7 @@ class VideoGenPipeline(DiffusionPipeline):
         p_ni_vsds: float = 0.6,
         p_re: float = 0.8,
         step_size: float = 1.,
-        imagenet_class: int = 980,  # New parameter for VAR generation
+        imagenet_class: int = 480,  # New parameter for VAR generation
     ):
         r"""
         Function invoked when calling the pipeline for generation.

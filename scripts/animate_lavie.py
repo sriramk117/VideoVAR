@@ -243,7 +243,7 @@ def main(args):
         os.makedirs(args.output_folder)
 
     # Get ImageNet class for VAR generation
-    imagenet_class = getattr(args, 'imagenet_class', 980)  # Default to class 980
+    imagenet_class = getattr(args, 'imagenet_class', 480)  # Default to class 980
 
     # Generate videos
     for i, cur_seed in enumerate(args.seed):
@@ -255,39 +255,6 @@ def main(args):
         for prompt in args.text_prompt:
             print(f'Processing prompt: "{prompt}" with seed {cur_seed}')
             print(f'Using ImageNet class {imagenet_class} for VAR image generation')
-            
-            # Suggest better ImageNet classes based on prompt content
-            suggested_class = None
-            prompt_lower = prompt.lower()
-            
-            if any(word in prompt_lower for word in ['volleyball']):
-                suggested_class = 980
-                if suggested_class == imagenet_class:
-                    print(f"✅ Perfect match! Using ImageNet class {imagenet_class} (volleyball) for volleyball-related prompt")
-                else:
-                    print(f"💡 SUGGESTION: For '{prompt}', ImageNet class 980 (volleyball) is perfect!")
-            elif any(word in prompt_lower for word in ['golden retriever', 'golden_retriever']):
-                suggested_class = 207
-                print(f"💡 SUGGESTION: For '{prompt}', consider using ImageNet class 207 (golden retriever) instead of {imagenet_class}")
-            elif any(word in prompt_lower for word in ['dog', 'puppy', 'retriever']):
-                suggested_class = 207  # Default to golden retriever
-                print(f"💡 SUGGESTION: For dog-related prompts like '{prompt}', consider using ImageNet class 207 (golden retriever)")
-            elif any(word in prompt_lower for word in ['cat', 'kitten', 'feline']):
-                suggested_class = 281  # tabby cat
-                print(f"💡 SUGGESTION: For cat-related prompts like '{prompt}', consider using ImageNet class 281 (tabby cat)")
-            elif any(word in prompt_lower for word in ['car', 'automobile', 'vehicle']):
-                suggested_class = 817  # sports car
-                print(f"💡 SUGGESTION: For car-related prompts like '{prompt}', consider using ImageNet class 817 (sports car)")
-            elif imagenet_class == 980 and 'volleyball' not in prompt_lower:
-                print(f"⚠️  POTENTIAL MISMATCH: Using ImageNet class 980 (volleyball) for prompt '{prompt}'")
-                print(f"   This might create inconsistency between the anchor image and final video")
-                print(f"   Consider using a more appropriate ImageNet class")
-            
-            if suggested_class and suggested_class != imagenet_class:
-                print(f"   To use the suggested class, run with: --imagenet_class {suggested_class}")
-                print(f"   Current class {imagenet_class} = volleyball")
-            
-            print()
             
             try:
                 # Generate video
@@ -435,7 +402,7 @@ if __name__ == "__main__":
     parser.add_argument("--sd_path", type=str, default="/root/DL/VideoVAR/models/stable-diffusion-v1-4", help="Path to Stable Diffusion model")
     parser.add_argument("--var_checkpoint_dir", type=str, default="", help="Directory containing VAR checkpoints")
     parser.add_argument("--var_model_depth", type=int, default=None, choices=[16, 20, 24, 30, 36], help="VAR model depth (defaults to config file value)")
-    parser.add_argument("--imagenet_class", type=int, default=980, help="ImageNet class for VAR generation")
+    parser.add_argument("--imagenet_class", type=int, default=480, help="ImageNet class for VAR generation")
     parser.add_argument("--model", type=str, default="UNet", help="Model type to use")
     args = parser.parse_args()
 
