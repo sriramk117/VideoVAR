@@ -48,7 +48,6 @@ except ImportError as e:
     print(f"Warning: Could not import VAR models: {e}")
     build_vae_var = None
 
-
 def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torch.float32):
     """
     Load VAR model and VAE for Mac compatibility
@@ -151,9 +150,14 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
 
 def main(args):
     torch.set_grad_enabled(False)
-    
+
+    # try to see if cuda is available
+    if torch.cuda.is_available():
+        device = "cuda"
+        dtype = torch.float32
+        print("Using CUDA (NVIDIA GPU)")
     # Device and dtype selection for Mac
-    if torch.backends.mps.is_available():
+    elif torch.backends.mps.is_available():
         device = "mps"
         dtype = torch.float32  # MPS works better with float32
         print("Using MPS (Metal Performance Shaders) on macOS")
