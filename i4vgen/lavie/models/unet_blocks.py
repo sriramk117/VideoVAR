@@ -9,9 +9,9 @@ from torch import nn
 try:
     from .attention import Transformer3DModel
     from .resnet import Downsample3D, ResnetBlock3D, Upsample3D
-except:
-    from attention import Transformer3DModel
-    from resnet import Downsample3D, ResnetBlock3D, Upsample3D
+except ImportError:
+    from i4vgen.lavie.models.attention import Transformer3DModel
+    from i4vgen.lavie.models.resnet import Downsample3D, ResnetBlock3D, Upsample3D
 
 
 def get_down_block(

@@ -25,9 +25,9 @@ from diffusers.models.modeling_utils import ModelMixin
 from einops import rearrange, repeat
 
 try:
-    from attention import BasicTransformerBlock
-except:
     from .attention import BasicTransformerBlock
+except ImportError:
+    from i4vgen.lavie.models.attention import BasicTransformerBlock
 
 @dataclass
 class Transformer3DModelOutput(BaseOutput):

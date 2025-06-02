@@ -518,14 +518,102 @@ class VideoGenPipeline(DiffusionPipeline):
 
                 print(f"Images for VAE with shape: {images_for_vae.shape}, dtype: {images_for_vae.dtype}")
 
-                # Multiply by 255 to visualize
-                images_for_vae_viz = images_for_vae * 255.0
-                images_for_vae_viz = images_for_vae_viz.clamp(0, 255).to(torch.uint8)
+                # Save VAR-generated images for debugging
+                print(f"🖼️  Saving VAR-generated images for inspection...")
+                import os
+                os.makedirs("./var_debug_images", exist_ok=True)
                 
-                # Image PIL visualize VAR-generated image
-                transform = T.ToPILImage()
-                images_for_vae_viz = transform(images_for_vae_viz[0].cpu())
-                images_for_vae_viz.show()
+                # Convert images back to [0,1] range for saving
+                images_for_saving = (images_for_vae + 1.0) / 2.0  # Convert from [-1,1] to [0,1]
+                images_for_saving = images_for_saving.clamp(0, 1)
+                
+                # Save each generated image
+                from torchvision.utils import save_image
+                for i in range(images_for_saving.shape[0]):
+                    save_path = f"./var_debug_images/var_generated_class_{imagenet_class}_image_{i}.png"
+                    save_image(images_for_saving[i], save_path)
+                    print(f"💾 Saved VAR image {i} to: {save_path}")
+                
+                # Create PIL images for inspection
+                import torchvision.transforms as T
+                to_pil = T.ToPILImage()
+                for i in range(images_for_saving.shape[0]):
+                    pil_image = to_pil(images_for_saving[i])
+                    print(f"📸 VAR generated image {i} as PIL:")
+                    print(pil_image)
+                
+                # Also print ImageNet class information
+                print(f"Generated {num_candidate_images} images using ImageNet class {imagenet_class}")
+                
+                # Let's look up what class 980 actually is
+                imagenet_classes = {
+                    980: "volleyball",
+                    151: "Chihuahua", 
+                    152: "Japanese spaniel",
+                    153: "Maltese dog, Maltese terrier, Maltese", 
+                    154: "Pekinese, Pekingese, Peke",
+                    155: "Shih-Tzu",
+                    156: "Blenheim spaniel",
+                    157: "papillon",
+                    158: "toy terrier",
+                    159: "Rhodesian ridgeback",
+                    160: "Afghan hound, Afghan",
+                    161: "basset, basset hound",
+                    162: "beagle",
+                    163: "bloodhound, sleuthhound",
+                    164: "bluetick",
+                    165: "black-and-tan coonhound",
+                    166: "Walker hound, Walker foxhound",
+                    167: "English foxhound",
+                    168: "redbone",
+                    169: "borzoi, Russian wolfhound",
+                    170: "Irish wolfhound",
+                    171: "Italian greyhound",
+                    172: "whippet",
+                    173: "Ibizan hound, Ibizan Podenco",
+                    174: "Norwegian elkhound, elkhound",
+                    175: "otterhound, otter hound",
+                    176: "Saluki, gazelle hound",
+                    177: "Scottish deerhound, deerhound",
+                    178: "Weimaraner",
+                    179: "Staffordshire bullterrier, Staffordshire bull terrier",
+                    180: "American Staffordshire terrier, Staffordshire terrier, American pit bull terrier, pit bull terrier",
+                    181: "Bedlington terrier",
+                    182: "Border terrier",
+                    183: "Kerry blue terrier",
+                    184: "Irish terrier",
+                    185: "Norfolk terrier",
+                    186: "Norwich terrier",
+                    187: "Yorkshire terrier",
+                    188: "wire-haired fox terrier",
+                    189: "Lakeland terrier",
+                    190: "Sealyham terrier, Sealyham",
+                    191: "Airedale, Airedale terrier",
+                    192: "cairn, cairn terrier",
+                    193: "Australian terrier",
+                    194: "Dandie Dinmont, Dandie Dinmont terrier",
+                    195: "Boston bull, Boston terrier",
+                    196: "miniature schnauzer",
+                    197: "giant schnauzer",
+                    198: "standard schnauzer",
+                    199: "Scotch terrier, Scottish terrier, Scottie",
+                    200: "Tibetan terrier, chrysanthemum dog",
+                    201: "silky terrier, Sydney silky",
+                    202: "soft-coated wheaten terrier",
+                    203: "West Highland white terrier",
+                    204: "Lhasa, Lhasa apso",
+                    205: "flat-coated retriever",
+                    206: "curly-coated retriever",
+                    207: "golden retriever",
+                    208: "Labrador retriever",
+                    209: "Chesapeake Bay retriever",
+                    210: "German short-haired pointer",
+                    211: "vizsla, Hungarian pointer"
+                }
+                
+                class_name = imagenet_classes.get(imagenet_class, f"Unknown class {imagenet_class}")
+                print(f"ImageNet class {imagenet_class} corresponds to: {class_name}")
+                print(f"Note: For 'golden retriever', you should use class 207 instead of {imagenet_class}")
                 
                 # Resize if needed
                 target_size = (320, 512)  # Height, Width
@@ -839,8 +927,6 @@ class VideoGenPipeline(DiffusionPipeline):
             imagenet_class=imagenet_class,
             device=device
         )
-        
-        raise NotImplementedError("VAR image generation is not implemented in this pipeline. Please implement the VAR model and VAE for image generation.") 
 
         '''Stage (1-2): Anchor image selection'''
         print('Stage (1-2): Anchor image selection')
@@ -862,6 +948,11 @@ class VideoGenPipeline(DiffusionPipeline):
 
         with torch.no_grad():
             candidate_image_reward_scores = self.image_reward_model.score(eval_prompt, candidate_images_pil_list)
+            
+            # Handle case where only one candidate image returns a single float
+            if isinstance(candidate_image_reward_scores, (int, float)):
+                candidate_image_reward_scores = [candidate_image_reward_scores]
+            
             anchor_image_index, anchor_image_score = max(enumerate(candidate_image_reward_scores), key=lambda x: x[1])
             # print('[candidate_image_reward_scores]', candidate_image_reward_scores)
             print('Anchor image index:', anchor_image_index, 'Anchor image score:', anchor_image_score)

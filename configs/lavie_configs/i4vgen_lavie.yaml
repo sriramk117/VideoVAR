@@ -1,9 +1,9 @@
 # path:
-ckpt_path: "/Users/gilliam/Desktop/493G1/VideoVAR/lavie_base.pt"
+ckpt_path: "models/LaVie_Base/lavie_base.pt"
 output_folder: "./samples/lavie/"
 
 # VAR config:
-var_checkpoint_dir: "/Users/gilliam/Desktop/493G1/VideoVAR/VAR/"
+var_checkpoint_dir: "VAR/"
 var_model_depth: 30
 imagenet_class: 980
 
@@ -24,10 +24,11 @@ use_fp16: True
 # sample config:
 seed: [0]
 run_time: 0
-guidance_scale: 7.0
+guidance_scale: 3.0
 sample_method: 'ddpm'
 num_sampling_steps: 50
 text_prompt: [
-       'A cup and a couch',
-       'A person eating a burger.',
+       'A volleyball ball rolling and bouncing',
+       'A volleyball moving in slow motion',
+       'A round white volleyball spinning slowly',
 ] 

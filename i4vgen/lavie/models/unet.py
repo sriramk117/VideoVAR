@@ -34,8 +34,8 @@ try:
         get_up_block,
     )
     from .resnet import InflatedConv3d
-except:
-    from unet_blocks import (
+except ImportError:
+    from i4vgen.lavie.models.unet_blocks import (
         CrossAttnDownBlock3D,
         CrossAttnUpBlock3D,
         DownBlock3D,
@@ -44,7 +44,7 @@ except:
         get_down_block,
         get_up_block,
     )
-    from resnet import InflatedConv3d
+    from i4vgen.lavie.models.resnet import InflatedConv3d
 
 from rotary_embedding_torch import RotaryEmbedding
 
@@ -413,11 +413,10 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         timesteps = timestep
         if not torch.is_tensor(timesteps):
             # This would be a good case for the `match` statement (Python 3.10+)
-            is_mps = sample.device.type == "mps"
             if isinstance(timestep, float):
-                dtype = torch.float32 if is_mps else torch.float64
+                dtype = torch.float64
             else:
-                dtype = torch.int32 if is_mps else torch.int64
+                dtype = torch.int64
             timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
         elif len(timesteps.shape) == 0:
             timesteps = timesteps[None].to(sample.device)

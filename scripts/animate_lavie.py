@@ -51,13 +51,12 @@ except ImportError as e:
 
 def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torch.float32):
     """
-    Load VAR model and VAE for Mac compatibility
-    Note: For MPS, we keep models on CPU to avoid dtype issues
+    Load VAR model and VAE
     
     Args:
         var_checkpoint_dir: Directory containing VAR checkpoints
         model_depth: Model depth (16, 20, 24, 30, or 36)
-        device: Device to load models on (for MPS, we'll use CPU)
+        device: Device to load models on
         dtype: Data type for models
     
     Returns:
@@ -67,12 +66,7 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
         print("Warning: VAR models not available. Skipping VAR model loading.")
         return None, None
     
-    # For MPS, always use CPU for VAR to avoid dtype issues
-    if device == 'mps':
-        print("Note: Loading VAR models on CPU to avoid MPS dtype issues")
-        var_device = 'cpu'
-    else:
-        var_device = device
+    var_device = device
     
     # Disable default parameter init for faster speed
     setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)
@@ -98,9 +92,9 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
     # Use 256px patch configuration
     patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
     
-    # Disable flash attention for Mac
+    # Disable flash attention for compatibility
     flash_attention = False
-    print(f"Building VAR models with flash attention disabled for Mac compatibility")
+    print(f"Building VAR models with flash attention disabled for compatibility")
 
     try:
         # Build VAE and VAR models on CPU first
@@ -108,7 +102,7 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
             V=4096, Cvae=32, ch=160, share_quant_resi=4,
             device='cpu', patch_nums=patch_nums,
             num_classes=1000, depth=model_depth, shared_aln=False,
-            flash_if_available=False  # Explicitly disable flash attention for Mac
+            flash_if_available=False  # Explicitly disable flash attention for compatibility
         )
         
         # Load checkpoints to CPU first
@@ -122,7 +116,7 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
         vae = vae.to(dtype=dtype)
         var = var.to(dtype=dtype)
         
-        # Move to target device (CPU for MPS to avoid issues)
+        # Move to target device
         if var_device != 'cpu':
             vae = vae.to(var_device)
             var = var.to(var_device)
@@ -152,17 +146,15 @@ def load_var_models(var_checkpoint_dir, model_depth=24, device='cpu', dtype=torc
 def main(args):
     torch.set_grad_enabled(False)
     
-    # Device and dtype selection for Mac
-    if torch.backends.mps.is_available():
-        device = "mps"
-        dtype = torch.float32  # MPS works better with float32
-        print("Using MPS (Metal Performance Shaders) on macOS")
-        # Set default dtype to float32 for MPS compatibility
-        torch.set_default_dtype(torch.float32)
+    # Device and dtype selection
+    if torch.cuda.is_available():
+        device = "cuda"
+        dtype = torch.float16  # Use float16 for CUDA for efficiency
+        print("Using CUDA GPU")
     else:
         device = "cpu"
         dtype = torch.float32
-        print("Using CPU on macOS")
+        print("Using CPU")
     
     # Load VAR models if checkpoint directory is provided
     var_vae, var_model = None, None
@@ -170,7 +162,7 @@ def main(args):
         print("Loading VAR models...")
         var_model_depth = getattr(args, 'var_model_depth', 24)
         
-        # Load VAR models with Mac compatibility
+        # Load VAR models with Linux compatibility
         var_vae, var_model = load_var_models(
             args.var_checkpoint_dir, 
             model_depth=var_model_depth,
@@ -179,7 +171,7 @@ def main(args):
         )
     
     # Paths - update this to your actual path
-    sd_path = args.sd_path if hasattr(args, 'sd_path') else '/Users/gilliam/Desktop/493G1/VideoVAR/stable-diffusion-v1-4'
+    sd_path = args.sd_path if hasattr(args, 'sd_path') else '/root/DL/VideoVAR/models/stable-diffusion-v1-4'
     
     # Load models with consistent dtype
     unet = get_models(args, sd_path).to(device, dtype=dtype)
@@ -239,8 +231,12 @@ def main(args):
     if image_reward_model is not None:
         videogen_pipeline.image_reward_model = image_reward_model
     
-    # Don't enable xformers on macOS
-    print("Xformers not enabled (running on macOS)")
+    # Enable xformers if available
+    try:
+        import xformers
+        print("Xformers enabled for improved performance")
+    except ImportError:
+        print("Xformers not available, using default attention")
 
     # Create output directory
     if not os.path.exists(args.output_folder):
@@ -260,27 +256,73 @@ def main(args):
             print(f'Processing prompt: "{prompt}" with seed {cur_seed}')
             print(f'Using ImageNet class {imagenet_class} for VAR image generation')
             
+            # Suggest better ImageNet classes based on prompt content
+            suggested_class = None
+            prompt_lower = prompt.lower()
+            
+            if any(word in prompt_lower for word in ['volleyball']):
+                suggested_class = 980
+                if suggested_class == imagenet_class:
+                    print(f"✅ Perfect match! Using ImageNet class {imagenet_class} (volleyball) for volleyball-related prompt")
+                else:
+                    print(f"💡 SUGGESTION: For '{prompt}', ImageNet class 980 (volleyball) is perfect!")
+            elif any(word in prompt_lower for word in ['golden retriever', 'golden_retriever']):
+                suggested_class = 207
+                print(f"💡 SUGGESTION: For '{prompt}', consider using ImageNet class 207 (golden retriever) instead of {imagenet_class}")
+            elif any(word in prompt_lower for word in ['dog', 'puppy', 'retriever']):
+                suggested_class = 207  # Default to golden retriever
+                print(f"💡 SUGGESTION: For dog-related prompts like '{prompt}', consider using ImageNet class 207 (golden retriever)")
+            elif any(word in prompt_lower for word in ['cat', 'kitten', 'feline']):
+                suggested_class = 281  # tabby cat
+                print(f"💡 SUGGESTION: For cat-related prompts like '{prompt}', consider using ImageNet class 281 (tabby cat)")
+            elif any(word in prompt_lower for word in ['car', 'automobile', 'vehicle']):
+                suggested_class = 817  # sports car
+                print(f"💡 SUGGESTION: For car-related prompts like '{prompt}', consider using ImageNet class 817 (sports car)")
+            elif imagenet_class == 980 and 'volleyball' not in prompt_lower:
+                print(f"⚠️  POTENTIAL MISMATCH: Using ImageNet class 980 (volleyball) for prompt '{prompt}'")
+                print(f"   This might create inconsistency between the anchor image and final video")
+                print(f"   Consider using a more appropriate ImageNet class")
+            
+            if suggested_class and suggested_class != imagenet_class:
+                print(f"   To use the suggested class, run with: --imagenet_class {suggested_class}")
+                print(f"   Current class {imagenet_class} = volleyball")
+            
+            print()
+            
             try:
                 # Generate video
                 with torch.no_grad():
-                    # Don't use autocast for MPS to avoid dtype mixing issues
-                    sample = videogen_pipeline(
-                        prompt=prompt, 
-                        video_length=args.video_length, 
-                        height=args.image_size[0], 
-                        width=args.image_size[1], 
-                        num_inference_steps=args.num_sampling_steps,
-                        guidance_scale=args.guidance_scale,
-                        use_fp16=False,  # Disable fp16 for Mac
-                        imagenet_class=imagenet_class
-                    )
+                    # Use autocast for CUDA efficiency
+                    if device == 'cuda':
+                        with torch.cuda.amp.autocast(dtype=dtype):
+                            sample = videogen_pipeline(
+                                prompt=prompt, 
+                                video_length=args.video_length, 
+                                height=args.image_size[0], 
+                                width=args.image_size[1], 
+                                num_inference_steps=args.num_sampling_steps,
+                                guidance_scale=args.guidance_scale,
+                                use_fp16=(dtype == torch.float16),
+                                imagenet_class=imagenet_class
+                            )
+                    else:
+                        sample = videogen_pipeline(
+                            prompt=prompt, 
+                            video_length=args.video_length, 
+                            height=args.image_size[0], 
+                            width=args.image_size[1], 
+                            num_inference_steps=args.num_sampling_steps,
+                            guidance_scale=args.guidance_scale,
+                            use_fp16=False,
+                            imagenet_class=imagenet_class
+                        )
                 
-                # Save video with Mac-compatible codec
+                # Save video with Linux-compatible codecs
                 videos = sample.video
                 video_mp4_name = os.path.join(args.output_folder, f"{prompt.replace(' ', '_')}-{cur_seed}.mp4")
                 video_mp4 = videos[0]
                 
-                # Save video with Mac-compatible methods
+                # Save video with Linux-compatible methods
                 video_saved = False
                 
                 # First, ensure video tensor is in correct format (T, H, W, C) with uint8
@@ -288,7 +330,7 @@ def main(args):
                     video_mp4 = video_mp4.clamp(0, 255).to(torch.uint8)
                 
                 # Try torchvision with available codecs
-                codecs_to_try = ['h264_videotoolbox', 'mpeg4', 'libopenh264']
+                codecs_to_try = ['libx264', 'mpeg4', 'libopenh264']
                 for codec in codecs_to_try:
                     try:
                         torchvision.io.write_video(video_mp4_name, video_mp4, fps=8, video_codec=codec)
@@ -338,7 +380,7 @@ def main(args):
                     video_mp4_name = os.path.join(args.output_folder, f"{prompt.replace(' ', '_')}-{cur_seed}-ni-vsds-video.mp4")
                     video_mp4 = ni_vsds_video[0]
                     
-                    # Save NI-VSDS video with Mac-compatible methods
+                    # Save NI-VSDS video with Linux-compatible methods
                     ni_vsds_video_saved = False
                     
                     # First, ensure video tensor is in correct format (T, H, W, C) with uint8
@@ -346,7 +388,7 @@ def main(args):
                         video_mp4 = video_mp4.clamp(0, 255).to(torch.uint8)
                     
                     # Try torchvision with available codecs
-                    codecs_to_try = ['h264_videotoolbox', 'mpeg4', 'libopenh264']
+                    codecs_to_try = ['libx264', 'mpeg4', 'libopenh264']
                     for codec in codecs_to_try:
                         try:
                             torchvision.io.write_video(video_mp4_name, video_mp4, fps=8, video_codec=codec)
@@ -390,9 +432,9 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
-    parser.add_argument("--sd_path", type=str, default="/Users/gilliam/Desktop/493G1/VideoVAR/stable-diffusion-v1-4", help="Path to Stable Diffusion model")
+    parser.add_argument("--sd_path", type=str, default="/root/DL/VideoVAR/models/stable-diffusion-v1-4", help="Path to Stable Diffusion model")
     parser.add_argument("--var_checkpoint_dir", type=str, default="", help="Directory containing VAR checkpoints")
-    parser.add_argument("--var_model_depth", type=int, default=24, choices=[16, 20, 24, 30, 36], help="VAR model depth")
+    parser.add_argument("--var_model_depth", type=int, default=None, choices=[16, 20, 24, 30, 36], help="VAR model depth (defaults to config file value)")
     parser.add_argument("--imagenet_class", type=int, default=980, help="ImageNet class for VAR generation")
     parser.add_argument("--model", type=str, default="UNet", help="Model type to use")
     args = parser.parse_args()
@@ -405,7 +447,9 @@ if __name__ == "__main__":
         config_args.var_checkpoint_dir = args.var_checkpoint_dir
     if args.sd_path:
         config_args.sd_path = args.sd_path
-    config_args.var_model_depth = args.var_model_depth
+    # Only override var_model_depth if explicitly provided
+    if args.var_model_depth is not None:
+        config_args.var_model_depth = args.var_model_depth
     config_args.imagenet_class = args.imagenet_class
     config_args.model = args.model
     
